@@ -29,7 +29,7 @@ const createOperation = function(action, symbol, diffRule) {
     operation.prototype.action = action;
     operation.prototype.symbol = symbol;
     operation.prototype.diffRule = diffRule;
-    operation.constructor = AbstractOperation;
+    operation.prototype.constructor = AbstractOperation;
     return operation;
 };
 
@@ -156,37 +156,6 @@ const parse = function(expression) {
     return stack.pop();
 };
 
-function CustomError(message) {
-    this.message = message;
-}
-CustomError.prototype = Object.create(Error.prototype);
-CustomError.constructor = Error;
-
-const defineErrorPrototype = (error) => {
-    error.prototype = Object.create(CustomError);
-    error.constructor = CustomError;
-}
-
-function BracketError(pos, expected, opening) {
-    this.message = expected ? "Expected" : "Unexpected" + opening ? "opening" : "closing" + " bracket at pos " + pos;
-}
-defineErrorPrototype(BracketError);
-
-function OperationError(pos) {
-    this.message = "Expected operation at pos " + pos;
-}
-defineErrorPrototype(OperationError);
-
-function TokenError(pos) {
-    this.message = "Invalid token at pos " + pos;
-}
-defineErrorPrototype(TokenError);
-
-function ArgumentsError(pos) {
-    this.message = "Invalid arguments at pos " + pos;
-}
-defineErrorPrototype(ArgumentsError);
-
 const parsePostfix = parsePostPrefix(takeLastElement);
 const parsePrefix = parsePostPrefix(takeFirstElement);
 
@@ -201,14 +170,17 @@ function parsePostPrefix(takeOperation) {
                 return VARIABLES[token];
             } else if (token === '(') {
                 return parseBrackets(source, takeOperation);
+            } else if (token === undefined) {
+                throw new EndOfFileError(0, false);
             } else {
-                throw new TokenError(0);
+                throw new TokenError(0, token);
             }
         }
         const res = parseSource();
-        if (source.getToken() !== undefined) {
+        const checkEnd = source.getToken();
+        if (checkEnd !== undefined) {
             const pos = source.pos;
-            throw new TokenError(pos);
+            throw new EndOfFileError(pos,true, checkEnd);
         }
         return res;
     }
@@ -218,33 +190,51 @@ function parseBrackets(source, takeOperation) {
     const pos = source.pos;
     const tokens = getDataInBrackets(source, takeOperation);
     const operation = takeOperation(tokens);
-    if (!(operation in OPERATIONS)) {
-        throw new OperationError(pos);
-    }
-    if (!checkArgs(tokens) ||
-        tokens.length !== OPERATIONS[operation].prototype.action.length && OPERATIONS[operation].prototype.action.length !== 0) {
-        throw new ArgumentsError(pos);
+    if (tokens.length !== OPERATIONS[operation].prototype.action.length
+        && OPERATIONS[operation].prototype.action.length !== 0) {
+        throw new ArgumentsCountError(takeOperation === takeLastElement ? pos : pos + operation.length,
+            OPERATIONS[operation].prototype.action.length,
+            tokens.length);
     }
     return new OPERATIONS[operation](...tokens);
 }
 
 function getDataInBrackets(source, takeOperation) {
     let data = [];
+    const pos = source.pos;
     while (true) {
         const token = source.getToken();
         if (token === ')') {
+            checkOperation(data[0], pos, takeFirstElement, takeOperation);
+            checkOperation(data.slice(-1)[0], source.pos - 1, takeLastElement, takeOperation);
             return data;
-        } else if (token in VARIABLES) {
-            data.push(VARIABLES[token]);
-        } else if (!isNaN(+token)) {
-            data.push(new Const(+token));
-        } else if (token in OPERATIONS) {
-            data.push(token);
-        } else if (token === '(') {
-            data.push(parseBrackets(source, takeOperation))
         } else {
-            throw new TokenError(source.pos - token.length);
+            if (data.length > 0) {
+                const checker = (data.slice(-1)[0] instanceof AbstractOperation
+                    || data.slice(-1)[0] instanceof Const
+                    || data.slice(-1)[0] instanceof Variable);
+                if (!(checker || data.length === 1 && data[0] in OPERATIONS && takeOperation === takeFirstElement)) {
+                    throw new ArgumentsError(source.pos, data.slice(-1)[0]);
+                }
+            }
+            data.push(parseToken(token, source, takeOperation));
         }
+    }
+}
+
+const parseToken = (token, source, takeOperation) => {
+    if (token === undefined) {
+        throw new EndOfFileError(source.pos, false);
+    } else if (!isNaN(+token)) {
+        return new Const(+token);
+    } else if (token in VARIABLES) {
+        return VARIABLES[token];
+    } else if (token in OPERATIONS) {
+        return token;
+    } else if (token === '(') {
+        return parseBrackets(source, takeOperation);
+    } else {
+        throw new ArgumentsError(source.pos - token.length, token);
     }
 }
 
@@ -271,19 +261,55 @@ Source.prototype.getToken = function() {
     }
 }
 
-function checkArgs(args) {
-    for (let arg of args) {
-        if (!(arg instanceof AbstractOperation || arg instanceof Const || arg instanceof Variable)) {
-            return false;
-        }
+const checkOperation = (token, pos, takeOperationFunction, usedTakeOperationFunction) => {
+    if (!(token in OPERATIONS) && takeOperationFunction === usedTakeOperationFunction) {
+        throw new OperationError(pos, token);
     }
-    return true;
 }
 
-function takeFirstElement(mas) {
-    return mas.shift();
+function takeFirstElement(arr) {
+    return arr.shift();
 }
 
-function takeLastElement(mas) {
-    return mas.pop();
+function takeLastElement(arr) {
+    return arr.pop();
 }
+
+function CustomError(message) {
+    this.message = message;
+}
+CustomError.prototype = Object.create(Error.prototype);
+CustomError.prototype.constructor = CustomError;
+CustomError.prototype.name = "CustomError";
+
+const defineError = (error, name) => {
+    error.prototype = Object.create(CustomError.prototype);
+    error.prototype.constructor = error;
+    error.prototype.name = name;
+}
+
+function OperationError(pos, token) {
+    this.message = "Expected operation at pos " + (pos + 1) + ", found: " + token;
+}
+defineError(OperationError, "OperationError");
+
+function TokenError(pos, token) {
+    this.message = "Invalid token at pos " + (pos + 1) + ", token: " + token;
+}
+defineError(TokenError, "TokenError");
+
+function ArgumentsError(pos, token) {
+    this.message = "Invalid argument at pos " + (pos + 1) + ", token: " + token;
+}
+defineError(ArgumentsError, "ArgumentsError");
+
+function ArgumentsCountError(pos, expected, found) {
+    this.message = "Invalid arguments count at pos " + (pos + 1) + ", expected: " + expected + ", found: " + found;
+}
+defineError(ArgumentsCountError, "ArgumentsCountError");
+
+function EndOfFileError(pos, expected, token) {
+    this.message = (expected ? "Expected" : "Unexpected") + " end of file at pos " + (pos + 1)
+        + (expected ? ", found: " + token : "");
+}
+defineError(EndOfFileError, "EndOfFileError");
